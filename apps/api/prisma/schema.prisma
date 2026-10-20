@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum DataScope {
+  OWN
+  ASSIGNED
+  BRANCH
+  ALL
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum OutboxStatus {
+  PENDING
+  DISPATCHED
+  FAILED
+  DEAD_LETTER
+}
+
+model Branch {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  users     User[]
+}
+
+model User {
+  id           String         @id @default(uuid())
+  email        String         @unique
+  passwordHash String
+  fullName     String
+  status       UserStatus     @default(ACTIVE)
+  branchId     String?
+  branch       Branch?        @relation(fields: [branchId], references: [id])
+  roles        UserRole[]
+  sessions     RefreshToken[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+}
+
+// Roles: OPERATOR, ADMIN, MANAGE, ADVISING, CUSTOMER (seeded). A role never implies all permissions.
+model Role {
+  id          String           @id @default(uuid())
+  code        String           @unique
+  name        String
+  permissions RolePermission[]
+  users       UserRole[]
+}
+
+model Permission {
+  id    String           @id @default(uuid())
+  code  String           @unique // e.g. applications.assign
+  roles RolePermission[]
+}
+
+// Data scope is granted per role-permission, not per role.
+model RolePermission {
+  roleId       String
+  permissionId String
+  scope        DataScope
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+// Opaque refresh tokens stored hashed; one family per login enables reuse detection.
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  familyId   String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+}
+
+model AuditLog {
+  id            String   @id @default(uuid())
+  actorId       String?
+  action        String
+  resourceType  String?
+  resourceId    String?
+  outcome       String
+  correlationId String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+// Transactional outbox: written in the same transaction as the business record.
+model OutboxEvent {
+  id            String       @id @default(uuid())
+  eventType     String
+  schemaVersion Int          @default(1)
+  aggregateType String
+  aggregateId   String
+  correlationId String?
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  nextAttemptAt DateTime     @default(now())
+  occurredAt    DateTime     @default(now())
+
+  @@index([status, nextAttemptAt])
+}

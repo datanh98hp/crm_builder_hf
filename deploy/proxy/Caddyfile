@@ -1,0 +1,5 @@
+{$API_DOMAIN:localhost} {
+	encode gzip
+	# Socket.IO/WebSocket upgrades are proxied transparently by Caddy.
+	reverse_proxy api:3000
+}

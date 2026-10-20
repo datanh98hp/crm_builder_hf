@@ -1,0 +1,69 @@
+# Single-host topology (NOT high availability). Only the proxy publishes public ports.
+# Migrations run as a separate one-shot step, never from every API replica:
+#   docker compose run --rm migrate
+# Scale the API or the worker independently, e.g.: docker compose up -d --scale api=2 --scale worker=2
+services:
+  proxy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ../proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [api]
+    restart: unless-stopped
+
+  api:
+    image: buildcrm-api:${IMAGE_TAG:-local}
+    build: { context: ../.., dockerfile: apps/api/Dockerfile }
+    env_file: ../../.env
+    environment:
+      TRUST_PROXY_HOPS: "1" # Caddy is the only proxy in front of the API
+    expose: ["3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    mem_limit: 512m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+
+  # Same image, different entrypoint (brief section 7): background jobs run apart from HTTP traffic.
+  worker:
+    image: buildcrm-api:${IMAGE_TAG:-local}
+    command: ["node", "dist/worker.js"]
+    env_file: ../../.env
+    healthcheck: { disable: true } # the image healthcheck probes the HTTP port, which the worker does not open
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    mem_limit: 256m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+
+  migrate:
+    image: buildcrm-api:${IMAGE_TAG:-local}
+    profiles: ["ops"]
+    env_file: ../../.env
+    command: ["npx", "prisma", "migrate", "deploy"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: buildcrm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: buildcrm
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U buildcrm"], interval: 5s, retries: 10 }
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set in .env}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes: [redis_data:/data]
+    healthcheck: { test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"], interval: 5s, retries: 10 }
+    restart: unless-stopped
+
+volumes: { caddy_data: {}, pg_data: {}, redis_data: {} }
